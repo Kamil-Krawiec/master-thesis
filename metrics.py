@@ -146,65 +146,100 @@ def compute_schema_adherence(df: pd.DataFrame,
     return {'dtype_validity': dtype_results,
             'range_adherence': range_results}
 
-
 def compute_constraint_adherence(synth: dict, metadata: dict):
     """
     Check PK uniqueness and FK integrity.
-    metadata: {table: {'pk': [...], 'fks': [{'columns', 'ref_table', 'ref_columns'}]}}
+    metadata: {
+      table: {
+        'pk': [...],
+        'fks': [
+          {'columns': [...], 'ref_table': '...', 'ref_columns': [...]}, ...
+        ]
+      }
+    }
     """
     results = {}
     for table, df in synth.items():
-        if len(df) > 0:
-            return
         results.setdefault(table, {})
+
+        # If the synthetic table is empty, skip detailed checks
+        if df.empty:
+            results[table]['pk_uniqueness'] = None
+            continue
+
         meta = metadata.get(table, {})
-        # PK
+
+        # --- Primary Key Uniqueness ---
         pk_cols = meta.get('pk', [])
-        if pk_cols :
-            results[table]['pk_uniqueness'] = df.drop_duplicates(pk_cols).shape[0] / len(df)
+        if pk_cols:
+            unique_count = df.drop_duplicates(subset=pk_cols).shape[0]
+            results[table]['pk_uniqueness'] = unique_count / len(df)
         else:
             results[table]['pk_uniqueness'] = None
 
-        # FKs
+        # --- Foreign Key Integrity ---
         for fk in meta.get('fks', []):
-            child_cols  = fk['columns']
-            parent_tbl  = fk['ref_table']
+            child_cols  = fk.get('columns', [])
+            parent_tbl  = fk.get('ref_table')
             parent_cols = fk.get('ref_columns') or child_cols
+            parent_df   = synth.get(parent_tbl)
 
-            if isinstance(child_cols, list):
-                child_keys = df[child_cols].apply(tuple, axis=1)
-                parent_keys = synth[parent_tbl][parent_cols].apply(tuple, axis=1)
-                valid = child_keys.isin(parent_keys)
-                key_name = '_'.join(child_cols)
+            # Skip if no valid FK definition or missing parent table
+            if not child_cols or parent_df is None:
+                continue
+
+            # Handle composite vs. single-column FKs
+            if isinstance(child_cols, (list, tuple)):
+                # build tuple keys
+                child_keys  = df[child_cols].apply(lambda row: tuple(row), axis=1)
+                parent_keys = parent_df[parent_cols].apply(lambda row: tuple(row), axis=1)
+                key_name    = "_".join(child_cols)
             else:
-                valid = df[child_cols].isin(synth[parent_tbl][parent_cols])
-                key_name = child_cols
+                child_keys  = df[child_cols]
+                parent_keys = parent_df[parent_cols]
+                key_name    = child_cols
 
-            results[table][f'fk_{key_name}'] = valid.mean()
+            valid_fraction = child_keys.isin(parent_keys).mean()
+            results[table][f"fk_{key_name}"] = valid_fraction
 
     return results
 
 
 def interpret_results(metrics: dict):
     """
-    Print human-readable interpretations of statistical and constraint results.
+    Print a human‐readable summary of:
+      - Univariate statistical fidelity (KS / chi-square + JS)
+      - Constraint adherence (PK uniqueness, FK integrity)
+    Handles composite FKs (joined by underscores) and empty tables gracefully.
     """
-    print("=== Statistical Fidelity ===")
-    for tbl, cols in metrics['statistical'].items():
-        print(f"\nTable: {tbl}")
-        for col, m in cols.items():
+    for table, col_metrics in metrics['statistical'].items():
+        print(f"\n=== Table: {table} ===")
+        print("— Statistical Fidelity —")
+        for col, m in col_metrics.items():
             if m.get('test') == 'ks':
-                p = m['p_value']
-                print(f"  • {col}: KS p-value={p:.3f} "
-                      + ("PASSED" if p > 0.05 else "SHIFT DETECTED"))
+                ks_stat, p = m['ks_stat'], m['p_value']
+                verdict = "no significant shift" if p > 0.05 else "shift detected"
+                print(f"  • {col}: KS stat={ks_stat:.3f}, p={p:.3f} → {verdict}.")
             else:
-                js = m['js_divergence']
-                print(f"  • {col}: JS divergence={js:.4f} (0=perfect)")
+                chi2, p_val = m['chi2_stat'], m['chi2_p']
+                jsd = m.get('js_divergence')
+                print(f"  • {col}: χ²={chi2:.3f}, p={p_val:.3f}, JS={jsd:.4f}.")
 
-    print("\n=== Constraint Adherence ===")
-    for tbl, vals in metrics['constraints'].items():
-        print(f"\nTable: {tbl}")
-        print(f"  • PK uniqueness: {vals['pk_uniqueness']:.3f}")
-        for k, v in vals.items():
-            if k.startswith('fk_'):
-                print(f"  • {k}: {v:.3f}")
+        print("— Constraint Adherence —")
+        c = metrics['constraints'].get(table, {})
+        # Primary key
+        pk = c.get('pk_uniqueness')
+        if pk is None:
+            print("  • PK uniqueness: N/A")
+        else:
+            print(f"  • PK uniqueness: {pk:.2%} unique rows")
+
+        # Foreign keys
+        for key, val in c.items():
+            if not key.startswith('fk_'):
+                continue
+            if val is None:
+                print(f"  • FK {cols}: N/A")
+            else:
+                integrity = "OK" if val > 0.99 else "violations detected"
+                print(f"  • FK {key}: {val:.2%} intact → {integrity}")
