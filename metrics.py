@@ -76,50 +76,76 @@ def compute_child_count_ks(real_child: pd.DataFrame,
 def compute_distance_metrics(real: pd.Series, synth: pd.Series):
     """
     Compute:
-      - Total Variation Distance [7]  [oai_citation:22‡Wikipedia](https://en.wikipedia.org/wiki/F-divergence?utm_source=chatgpt.com)
-      - KL divergence [8]  [oai_citation:23‡Wikipedia](https://en.wikipedia.org/wiki/Kullback%E2%80%93Leibler_divergence?utm_source=chatgpt.com)
-      - JS divergence [6]  [oai_citation:24‡Wikipedia](https://en.wikipedia.org/wiki/Jensen%E2%80%93Shannon_divergence?utm_source=chatgpt.com)
-      - Wasserstein distance [9]  [oai_citation:25‡VLDB](https://www.vldb.org/pvldb/vol13/p1962-fan.pdf?utm_source=chatgpt.com)
-      - Maximum Mean Discrepancy (MMD) [10]  [oai_citation:26‡Wikipedia](https://en.wikipedia.org/wiki/Kernel_embedding_of_distributions?utm_source=chatgpt.com)
+      - Total Variation Distance (TV)
+      - Kullback–Leibler divergence (KL)
+      - Jensen–Shannon divergence (JS)
+      - Wasserstein distance (numeric only)
+      - Maximum Mean Discrepancy (MMD, numeric only)
+    Returns a dict; non‐numeric metrics are set to None.
     """
-    # Build discrete histograms
-    r_counts = real.value_counts(normalize=True)
-    s_counts = synth.value_counts(normalize=True)
-    idx = r_counts.index.union(s_counts.index)
-    p = r_counts.reindex(idx, fill_value=0).values
-    q = s_counts.reindex(idx, fill_value=0).values
+    # Build discrete distributions for any dtype
+    real_counts = real.fillna('NA').astype(str).value_counts(normalize=True)
+    synth_counts = synth.fillna('NA').astype(str).value_counts(normalize=True)
+    idx = real_counts.index.union(synth_counts.index)
+    p = real_counts.reindex(idx, fill_value=0).values
+    q = synth_counts.reindex(idx, fill_value=0).values
 
+    # Total Variation
     tv = 0.5 * np.sum(np.abs(p - q))
+    # KL divergence with smoothing
     kl = entropy(p + 1e-12, q + 1e-12)
+    # JS divergence
     m = 0.5 * (p + q)
-    js = 0.5 * (entropy(p+1e-12, m) + entropy(q+1e-12, m))
-    wass = wasserstein_distance(real.dropna(), synth.dropna())
+    js = 0.5 * (entropy(p + 1e-12, m) + entropy(q + 1e-12, m))
 
-    # MMD
-    X = real.dropna().values.reshape(-1,1)
-    Y = synth.dropna().values.reshape(-1,1)
-    Kxx = rbf_kernel(X, X)
-    Kyy = rbf_kernel(Y, Y)
-    Kxy = rbf_kernel(X, Y)
-    mmd = Kxx.sum()/ (len(X)**2) + Kyy.sum()/(len(Y)**2) - 2*Kxy.sum()/(len(X)*len(Y))
+    # Initialize numeric-only metrics
+    wass = None
+    mmd  = None
 
-    return {'tv':tv, 'kl':kl, 'js':js, 'wass':wass, 'mmd':mmd}
+    # Check if column is numeric
+    if pd.api.types.is_numeric_dtype(real) and pd.api.types.is_numeric_dtype(synth):
+        # Convert and drop NaNs
+        real_num = pd.to_numeric(real, errors='coerce').dropna().astype(float)
+        synth_num = pd.to_numeric(synth, errors='coerce').dropna().astype(float)
 
+        if len(real_num) and len(synth_num):
+            # Wasserstein distance
+            wass = wasserstein_distance(real_num, synth_num)
+
+            # MMD via RBF kernel
+            X = real_num.values.reshape(-1, 1)
+            Y = synth_num.values.reshape(-1, 1)
+            Kxx = rbf_kernel(X, X)
+            Kyy = rbf_kernel(Y, Y)
+            Kxy = rbf_kernel(X, Y)
+            mmd = (Kxx.sum() / (len(X)**2)
+                   + Kyy.sum() / (len(Y)**2)
+                   - 2 * Kxy.sum() / (len(X) * len(Y)))
+
+    return {
+        'tv': tv,
+        'kl': kl,
+        'js': js,
+        'wasserstein': wass,
+        'mmd': mmd
+    }
 
 def compute_schema_adherence(df: pd.DataFrame,
                              dtype_map: dict,
                              range_map: dict):
     """
     Check:
-      - Data type validity per column [2]  [oai_citation:27‡ResearchGate](https://www.researchgate.net/publication/388722401_SQLSynthGen_Generating_Synthetic_Data_for_Healthcare_Databases?utm_source=chatgpt.com)
-      - Range adherence (min/max) [2]  [oai_citation:28‡ResearchGate](https://www.researchgate.net/publication/388722401_SQLSynthGen_Generating_Synthetic_Data_for_Healthcare_Databases?utm_source=chatgpt.com)
+      - Data type validity per column
+      - Range adherence (min/max)
     """
     # Data type validity
     dtype_results = {}
     for col, dt in dtype_map.items():
         series = df[col]
         if dt.startswith('int'):
-            valid = pd.to_numeric(series, errors='coerce').dropna().apply(float.is_integer)
+            # coerce to float, then test integer‐ness
+            nums = pd.to_numeric(series, errors='coerce').dropna().astype(float)
+            valid = nums.apply(lambda x: x.is_integer())
         elif dt in ('float','real'):
             valid = pd.to_numeric(series, errors='coerce').notna()
         elif dt in ('date','timestamp'):
@@ -130,11 +156,13 @@ def compute_schema_adherence(df: pd.DataFrame,
 
     # Range adherence
     range_results = {}
-    for col,(lo,hi) in range_map.items():
-        s = pd.to_numeric(df[col], errors='coerce').dropna()
-        range_results[col] = s.between(lo, hi).mean()
+    for col, (lo, hi) in range_map.items():
+        # only check numeric ranges
+        nums = pd.to_numeric(df[col], errors='coerce').dropna().astype(float)
+        in_range = nums.between(lo, hi) if lo is not None and hi is not None else pd.Series([True]*len(nums))
+        range_results[col] = in_range.mean()
 
-    return {'dtype_validity':dtype_results, 'range_adherence':range_results}
+    return {'dtype_validity': dtype_results, 'range_adherence': range_results}
 
 
 def compute_constraint_adherence(synth: dict, metadata: dict):
