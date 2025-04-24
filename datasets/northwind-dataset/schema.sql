@@ -1,5 +1,4 @@
 
-
 CREATE TABLE categories (
     category_id smallint NOT NULL PRIMARY KEY,
     category_name character varying(15) NOT NULL,
@@ -8,12 +7,19 @@ CREATE TABLE categories (
 );
 
 
+--
+-- Name: customer_demographics; Type: TABLE; Schema: public; Owner: -; Tablespace:
+--
 
 CREATE TABLE customer_demographics (
     customer_type_id bpchar NOT NULL PRIMARY KEY,
     customer_desc text
 );
 
+
+--
+-- Name: customers; Type: TABLE; Schema: public; Owner: -; Tablespace:
+--
 
 CREATE TABLE customers (
     customer_id bpchar NOT NULL PRIMARY KEY,
@@ -28,6 +34,10 @@ CREATE TABLE customers (
     phone character varying(24),
     fax character varying(24)
 );
+
+--
+-- Name: customer_customer_demo; Type: TABLE; Schema: public; Owner: -; Tablespace:
+--
 
 CREATE TABLE customer_customer_demo (
     customer_id bpchar NOT NULL,
@@ -59,10 +69,8 @@ CREATE TABLE employees (
     photo bytea,
     notes text,
     reports_to smallint,
-    photo_path character varying(255)
+    photo_path character varying(255),
 );
-
-
 
 CREATE TABLE suppliers (
     supplier_id smallint NOT NULL PRIMARY KEY,
@@ -80,6 +88,10 @@ CREATE TABLE suppliers (
 );
 
 
+--
+-- Name: products; Type: TABLE; Schema: public; Owner: -; Tablespace:
+--
+
 CREATE TABLE products (
     product_id smallint NOT NULL PRIMARY KEY,
     product_name character varying(40) NOT NULL,
@@ -95,12 +107,20 @@ CREATE TABLE products (
 	FOREIGN KEY (supplier_id) REFERENCES suppliers
 );
 
+
+--
+-- Name: region; Type: TABLE; Schema: public; Owner: -; Tablespace:
+--
+
 CREATE TABLE region (
     region_id smallint NOT NULL PRIMARY KEY,
     region_description bpchar NOT NULL
 );
 
 
+--
+-- Name: shippers; Type: TABLE; Schema: public; Owner: -; Tablespace:
+--
 
 CREATE TABLE shippers (
     shipper_id smallint NOT NULL PRIMARY KEY,
@@ -109,6 +129,9 @@ CREATE TABLE shippers (
 );
 
 
+--
+-- Name: orders; Type: TABLE; Schema: public; Owner: -; Tablespace:
+--
 
 CREATE TABLE orders (
     order_id smallint NOT NULL PRIMARY KEY,
@@ -127,9 +150,12 @@ CREATE TABLE orders (
     ship_country character varying(15),
     FOREIGN KEY (customer_id) REFERENCES customers,
     FOREIGN KEY (employee_id) REFERENCES employees,
-    FOREIGN KEY (ship_via) REFERENCES shippers
 );
 
+
+--
+-- Name: territories; Type: TABLE; Schema: public; Owner: -; Tablespace:
+--
 
 CREATE TABLE territories (
     territory_id character varying(20) NOT NULL PRIMARY KEY,
@@ -139,6 +165,9 @@ CREATE TABLE territories (
 );
 
 
+--
+-- Name: employee_territories; Type: TABLE; Schema: public; Owner: -; Tablespace:
+--
 
 CREATE TABLE employee_territories (
     employee_id smallint NOT NULL,
@@ -149,6 +178,9 @@ CREATE TABLE employee_territories (
 );
 
 
+--
+-- Name: order_details; Type: TABLE; Schema: public; Owner: -; Tablespace:
+--
 
 CREATE TABLE order_details (
     order_id smallint NOT NULL,
@@ -161,6 +193,10 @@ CREATE TABLE order_details (
     FOREIGN KEY (order_id) REFERENCES orders
 );
 
+
+--
+-- Name: us_states; Type: TABLE; Schema: public; Owner: -; Tablespace:
+--
 
 CREATE TABLE us_states (
     state_id smallint NOT NULL PRIMARY KEY,
