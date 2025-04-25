@@ -69,7 +69,7 @@ CREATE TABLE employees (
     photo bytea,
     notes text,
     reports_to smallint,
-    photo_path character varying(255),
+    photo_path character varying(255)
 );
 
 CREATE TABLE suppliers (
