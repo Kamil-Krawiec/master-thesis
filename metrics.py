@@ -205,41 +205,107 @@ def compute_constraint_adherence(synth: dict, metadata: dict):
     return results
 
 
-def interpret_results(metrics: dict):
+import pandas as pd
+
+def interpret_full_results(full_results: dict):
     """
-    Print a human‐readable summary of:
-      - Univariate statistical fidelity (KS / chi-square + JS)
-      - Constraint adherence (PK uniqueness, FK integrity)
-    Handles composite FKs (joined by underscores) and empty tables gracefully.
+    Build and display summary DataFrames for all experiment metrics,
+    then print human‐readable interpretation.
     """
-    for table, col_metrics in metrics['statistical'].items():
-        print(f"\n=== Table: {table} ===")
-        print("— Statistical Fidelity —")
-        for col, m in col_metrics.items():
+    # 1) Generation time
+    gen_time = full_results.get('generation_time_s')
+    print(f"\nData generation time: {gen_time:.2f} seconds\n")
+
+    # 2) Statistical fidelity
+    stat_rows = []
+    for table, cols in full_results['statistical_fidelity'].items():
+        for col, m in cols.items():
             if m.get('test') == 'ks':
-                ks_stat, p = m['ks_stat'], m['p_value']
-                verdict = "no significant shift" if p > 0.05 else "shift detected"
-                print(f"  • {col}: KS stat={ks_stat:.3f}, p={p:.3f} → {verdict}.")
+                stat_rows.append({
+                    'Table': table, 'Column': col, 'Test': 'KS',
+                    'Statistic': m['ks_stat'], 'P-value': m['p_value'],
+                    'JS divergence': None
+                })
             else:
-                chi2, p_val = m['chi2_stat'], m['chi2_p']
-                jsd = m.get('js_divergence')
-                print(f"  • {col}: χ²={chi2:.3f}, p={p_val:.3f}, JS={jsd:.4f}.")
+                stat_rows.append({
+                    'Table': table, 'Column': col, 'Test': 'Chi²+JS',
+                    'Statistic': m['chi2_stat'], 'P-value': m['chi2_p'],
+                    'JS divergence': m['js_divergence']
+                })
+    stats_df = pd.DataFrame(stat_rows)
+    print("--- Statistical Fidelity ---")
+    print(stats_df.to_string(index=False))
 
-        print("— Constraint Adherence —")
-        c = metrics['constraints'].get(table, {})
-        # Primary key
+    # 3) Distance metrics
+    dist_rows = []
+    for table, cols in full_results['distance_metrics'].items():
+        for col, d in cols.items():
+            dist_rows.append({
+                'Table': table, 'Column': col,
+                'TV': d['tv'], 'KL': d['kl'],
+                'JS': d['js'],
+                'Wasserstein': d['wasserstein'],
+                'MMD': d['mmd']
+            })
+    dist_df = pd.DataFrame(dist_rows)
+    print("\n--- Distance Metrics ---")
+    print(dist_df.to_string(index=False))
+
+    # 4) Child-count KS
+    child_rows = []
+    for table, fks in full_results['child_count_ks'].items():
+        for fk_key, m in fks.items():
+            child_rows.append({
+                'Table': table, 'FK': fk_key,
+                'KS stat': m['child_ks_stat'],
+                'P-value': m['child_ks_p']
+            })
+    child_df = pd.DataFrame(child_rows)
+    print("\n--- Child-Count KS for FKs ---")
+    print(child_df.to_string(index=False))
+
+    # 5) Schema & range adherence
+    schema_rows = []
+    for table, sc in full_results['schema_adherence'].items():
+        for col, v in sc['dtype_validity'].items():
+            schema_rows.append({
+                'Table': table, 'Column': col,
+                'Check': 'Type validity', 'Value': v
+            })
+        for col, v in sc['range_adherence'].items():
+            schema_rows.append({
+                'Table': table, 'Column': col,
+                'Check': 'Range adherence', 'Value': v
+            })
+    schema_df = pd.DataFrame(schema_rows)
+    print("\n--- Schema & Range Adherence ---")
+    print(schema_df.to_string(index=False))
+
+    # 6) Constraint adherence
+    cons_rows = []
+    for table, c in full_results['constraint_adherence'].items():
         pk = c.get('pk_uniqueness')
-        if pk is None:
-            print("  • PK uniqueness: N/A")
-        else:
-            print(f"  • PK uniqueness: {pk:.2%} unique rows")
+        cons_rows.append({
+            'Table': table, 'Constraint': 'PK uniqueness',
+            'Value': pk
+        })
+        for key, v in c.items():
+            if key.startswith('fk_'):
+                cons_rows.append({
+                    'Table': table, 'Constraint': key,
+                    'Value': v
+                })
+    cons_df = pd.DataFrame(cons_rows)
+    print("\n--- Constraint Adherence ---")
+    print(cons_df.to_string(index=False))
 
-        # Foreign keys
-        for key, val in c.items():
-            if not key.startswith('fk_'):
-                continue
-            if val is None:
-                print(f"  • FK {cols}: N/A")
-            else:
-                integrity = "OK" if val > 0.99 else "violations detected"
-                print(f"  • FK {key}: {val:.2%} intact → {integrity}")
+    # 7) Interpretation
+    print("\nInterpretation:")
+    print(" • KS P-value > 0.05 → no significant numeric shift.")
+    print(" • JS divergence near 0 → categorical distributions match closely.")
+    print(" • TV, KL small → high overall fidelity; Wasserstein & MMD closer to 0 → better.")
+    print(" • Child-count KS P-value > 0.05 → FK relationship counts preserved.")
+    print(" • Type validity = fraction of values matching declared SQL type.")
+    print(" • Range adherence = fraction within real-data min/max bounds.")
+    print(" • PK uniqueness = fraction of unique primary keys (1.00 = perfect).")
+    print(" • FK integrity = fraction of child rows pointing to existing parent keys (1.00 = perfect).")

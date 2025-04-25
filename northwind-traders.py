@@ -33,6 +33,7 @@ def setup_data_filler(schema_path, real_data):
     dg = DataGenerator(schema_tables,
                        num_rows_per_table=num_rows,
                        max_attepts_to_generate_value=100)
+    dg.export_data_files(output_dir='data_generator_results/',file_type = 'CSV')
     return dg, schema_tables
 
 def generate_synthetic(dg):
@@ -111,10 +112,7 @@ def main():
         'constraint_adherence': constraint_results
     }
 
-    metrics.interpret_results({
-        'statistical': stats,
-        'constraints': constraint_results
-    })
+    metrics.interpret_full_results(full_results)
 
     with open(os.path.join(RESULTS_DIR, 'results.json'), 'w') as f:
         json.dump(full_results, f, indent=2)
