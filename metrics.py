@@ -183,10 +183,20 @@ def evaluate_from_csv_dirs(real_dir: str,
 
 def interpret_and_save(full_results: dict, output_dir: str):
     """
-    Convert full_results into pandas DataFrames and write each to CSV files
-    instead of dumping a single JSON.
+    Convert full_results into pandas DataFrames with an added 'Interpretation'
+    column, and write each to CSV files.
     """
+
     os.makedirs(output_dir, exist_ok=True)
+
+    # Helper for KS/chi2 interpretation
+    def interpret_stat(row):
+        if row['Test'] == 'KS':
+            return ("no shift" if row['P-value'] > 0.05
+                    else "shift detected")
+        else:
+            return ("categorical match" if (row['P-value'] > 0.05 and row['JS divergence'] < 0.1)
+                    else "categories differ")
 
     # 1) Statistical fidelity
     stat_rows = []
@@ -201,9 +211,17 @@ def interpret_and_save(full_results: dict, output_dir: str):
                 'JS divergence': m.get('js_divergence')
             })
     stats_df = pd.DataFrame(stat_rows)
+    stats_df['Interpretation'] = stats_df.apply(interpret_stat, axis=1)
     stats_df.to_csv(os.path.join(output_dir, 'statistical_fidelity.csv'), index=False)
 
     # 2) Distance metrics
+    def interpret_dist(row):
+        # small values (<0.1) are good
+        vals = [row['TV'], row['KL'], row['JS']]
+        if all(v < 0.1 for v in vals):
+            return "high fidelity"
+        return "noticeable divergence"
+
     dist_rows = []
     for tbl, cols in full_results['distance_metrics'].items():
         for col, d in cols.items():
@@ -217,9 +235,13 @@ def interpret_and_save(full_results: dict, output_dir: str):
                 'MMD': d['mmd']
             })
     dist_df = pd.DataFrame(dist_rows)
+    dist_df['Interpretation'] = dist_df.apply(interpret_dist, axis=1)
     dist_df.to_csv(os.path.join(output_dir, 'distance_metrics.csv'), index=False)
 
     # 3) Child-count KS
+    def interpret_child(row):
+        return ("counts match" if row['P-value'] > 0.05 else "counts differ")
+
     child_rows = []
     for tbl, fks in full_results['child_count_ks'].items():
         for fk, m in fks.items():
@@ -229,10 +251,17 @@ def interpret_and_save(full_results: dict, output_dir: str):
                 'KS stat': m['child_ks_stat'],
                 'P-value': m['child_ks_p']
             })
+
+
     child_df = pd.DataFrame(child_rows)
-    child_df.to_csv(os.path.join(output_dir, 'child_count_ks.csv'), index=False)
+    if not child_df.empty:
+        child_df['Interpretation'] = child_df.apply(interpret_child, axis=1)
+        child_df.to_csv(os.path.join(output_dir, 'child_count_ks.csv'), index=False)
 
     # 4) Schema & range adherence
+    def interpret_schema(row):
+        return ("OK" if row['Value'] > 0.99 else "violations")
+
     schema_rows = []
     for tbl, sc in full_results['schema_adherence'].items():
         for col, v in sc['dtype_validity'].items():
@@ -240,9 +269,16 @@ def interpret_and_save(full_results: dict, output_dir: str):
         for col, v in sc['range_adherence'].items():
             schema_rows.append({'Table': tbl, 'Column': col, 'Check': 'range', 'Value': v})
     schema_df = pd.DataFrame(schema_rows)
+    schema_df['Interpretation'] = schema_df.apply(interpret_schema, axis=1)
     schema_df.to_csv(os.path.join(output_dir, 'schema_adherence.csv'), index=False)
 
     # 5) Constraint adherence
+    def interpret_constraint(row):
+        if row['Constraint'] == 'pk_uniqueness':
+            return ("OK" if row['Value'] and row['Value'] > 0.99 else "duplicates")
+        else:
+            return ("OK" if row['Value'] and row['Value'] > 0.99 else "violations")
+
     cons_rows = []
     for tbl, c in full_results['constraint_adherence'].items():
         cons_rows.append({'Table': tbl, 'Constraint': 'pk_uniqueness', 'Value': c.get('pk_uniqueness')})
@@ -250,7 +286,8 @@ def interpret_and_save(full_results: dict, output_dir: str):
             if k.startswith('fk_'):
                 cons_rows.append({'Table': tbl, 'Constraint': k, 'Value': v})
     cons_df = pd.DataFrame(cons_rows)
+    cons_df['Interpretation'] = cons_df.apply(interpret_constraint, axis=1)
     cons_df.to_csv(os.path.join(output_dir, 'constraint_adherence.csv'), index=False)
 
-    print(f"All result tables written to {output_dir}")
+    print(f"All result tables with interpretations written to {output_dir}")
 

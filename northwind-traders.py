@@ -21,7 +21,7 @@ import metrics
 
 # Configuration
 CSV_DIR = 'datasets/csv/'
-SYNTH_CSV_DIR = 'data_generator_results/'
+SYNTH_CSV_DIR = 'data_generator_data/'
 SCHEMA_FILE = 'datasets/northwind-dataset/schema.sql'
 RESULTS_DIR = 'results/'
 
