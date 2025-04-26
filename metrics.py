@@ -84,9 +84,9 @@ def distance_metrics_df(real: pd.Series, synth: pd.Series, table: str, column: s
             wass = wasserstein_distance(rn, sn)
             X, Y = rn.values.reshape(-1, 1), sn.values.reshape(-1, 1)
             Kxx, Kyy, Kxy = rbf_kernel(X, X), rbf_kernel(Y, Y), rbf_kernel(X, Y)
-            mmd = (Kxx.sum() / (len(X)**2)
-                   + Kyy.sum() / (len(Y)**2)
-                   - 2 * Kxy.sum() / (len(X)*len(Y)))
+            mmd = (Kxx.sum() / (len(X) ** 2)
+                   + Kyy.sum() / (len(Y) ** 2)
+                   - 2 * Kxy.sum() / (len(X) * len(Y)))
             rows.append((table, column, 'wasserstein', wass))
             rows.append((table, column, 'mmd', mmd))
 
@@ -95,22 +95,36 @@ def distance_metrics_df(real: pd.Series, synth: pd.Series, table: str, column: s
 
 def child_count_ks_df(real_data: dict, synth_data: dict, schema: dict) -> pd.DataFrame:
     """
-    For each foreign-key in schema, compares child-count distributions via KS.
-    Returns table, fk, metric, value.
+    For each table and its foreign-keys in schema, compares the distribution of
+    child-row counts per parent key via a two-sample KS test.
+    Returns a DataFrame with columns: table, fk, metric, value.
     """
     rows = []
     for table, meta in schema.items():
+        real_df = real_data.get(table)
+        synth_df = synth_data.get(table)
+        if real_df is None or synth_df is None:
+            continue
+
         for fk in meta.get('foreign_keys', []):
-            fk_cols = fk['columns']
-            parent = fk['ref_table']
-            if parent not in real_data or parent not in synth_data:
+            fk_cols = fk.get('columns')
+            if isinstance(fk_cols, (list, tuple)):
+                group_cols = fk_cols
+                fk_name = "_".join(fk_cols)
+            else:
+                group_cols = [fk_cols]
+                fk_name = fk_cols
+
+            # count number of child rows per parent key in real vs. synth
+            rc = real_df.groupby(group_cols).size()
+            sc = synth_df.groupby(group_cols).size()
+            if rc.empty or sc.empty:
                 continue
-            rc = real_data[parent].groupby(fk_cols).size()
-            sc = synth_data[parent].groupby(fk_cols).size()
-            stat, p = ks_2samp(rc, sc)
-            fk_name = '_'.join(fk_cols) if isinstance(fk_cols, (list, tuple)) else fk_cols
+
+            stat, p = ks_2samp(rc.values, sc.values)
             rows.append((table, fk_name, 'child_ks_stat', stat))
             rows.append((table, fk_name, 'child_ks_p', p))
+
     return pd.DataFrame(rows, columns=['table', 'fk', 'metric', 'value'])
 
 
@@ -184,20 +198,20 @@ def constraint_metrics_df(synth_data: dict, schema: dict) -> pd.DataFrame:
 
 # Interpretation rules by metric
 interpret_rules = {
-    'ks_stat':        lambda v: 'no shift' if v > 0.05 else 'shift detected',
-    'p_value':        lambda v: 'match' if v > 0.05 else 'difference',
-    'chi2_p':         lambda v: 'match' if v > 0.05 else 'difference',
-    'js_divergence':  lambda v: 'high fidelity' if v < 0.1 else 'divergence',
-    'tv':             lambda v: 'high fidelity' if v < 0.1 else 'noticeable divergence',
-    'kl':             lambda v: 'high fidelity' if v < 0.1 else 'noticeable divergence',
-    'js':             lambda v: 'high fidelity' if v < 0.1 else 'noticeable divergence',
-    'wasserstein':    lambda v: 'small distance' if v < 1 else 'larger distance',
-    'mmd':            lambda v: 'small MMD' if v < 1e-3 else 'larger MMD',
-    'child_ks_stat':  lambda v: 'counts match' if v < 0.05 else 'counts differ',
-    'child_ks_p':     lambda v: 'counts match' if v > 0.05 else 'counts differ',
-    'validity':       lambda v: 'OK' if v > 0.99 else 'violations',
-    'adherence':      lambda v: 'OK' if v > 0.99 else 'violations',
-    'value':          lambda v: 'OK' if v > 0.99 else 'violations',
+    'ks_stat': lambda v: 'no shift' if v > 0.05 else 'shift detected',
+    'p_value': lambda v: 'match' if v > 0.05 else 'difference',
+    'chi2_p': lambda v: 'match' if v > 0.05 else 'difference',
+    'js_divergence': lambda v: 'high fidelity' if v < 0.1 else 'divergence',
+    'tv': lambda v: 'high fidelity' if v < 0.1 else 'noticeable divergence',
+    'kl': lambda v: 'high fidelity' if v < 0.1 else 'noticeable divergence',
+    'js': lambda v: 'high fidelity' if v < 0.1 else 'noticeable divergence',
+    'wasserstein': lambda v: 'small distance' if v < 1 else 'larger distance',
+    'mmd': lambda v: 'small MMD' if v < 1e-3 else 'larger MMD',
+    'child_ks_stat': lambda v: 'counts match' if v < 0.05 else 'counts differ',
+    'child_ks_p': lambda v: 'counts match' if v > 0.05 else 'counts differ',
+    'validity': lambda v: 'OK' if v > 0.99 else 'violations',
+    'adherence': lambda v: 'OK' if v > 0.99 else 'violations',
+    'value': lambda v: 'OK' if v > 0.99 else 'violations',
 }
 
 
@@ -205,6 +219,7 @@ def interpret(df: pd.DataFrame) -> pd.DataFrame:
     """
     Add an 'interpretation' column based on metric and value.
     """
+
     def apply_rule(row):
         metric = row['metric']
         value = row['value']
@@ -237,16 +252,16 @@ class SyntheticDataEvaluator:
 
     def evaluate(self) -> dict:
         stats = apply_per_column(self.real_data, self.synth_data, ks_and_chi2)
-        dist  = apply_per_column(self.real_data, self.synth_data, distance_metrics_df)
+        dist = apply_per_column(self.real_data, self.synth_data, distance_metrics_df)
         child = child_count_ks_df(self.real_data, self.synth_data, self.schema)
         schema_chk = schema_adherence_df(self.synth_data, self.schema, self.real_data)
-        cons  = constraint_metrics_df(self.synth_data, self.schema)
+        cons = constraint_metrics_df(self.synth_data, self.schema)
 
         return {
             'statistical_fidelity': interpret(stats),
-            'distance_metrics':     interpret(dist),
-            'child_count_ks':       interpret(child),
-            'schema_adherence':     interpret(schema_chk),
+            'distance_metrics': interpret(dist),
+            'child_count_ks': interpret(child),
+            'schema_adherence': interpret(schema_chk),
             'constraint_adherence': interpret(cons),
         }
 

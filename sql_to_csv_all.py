@@ -8,7 +8,7 @@ import sys
 # STATIC CONFIGURATION
 SQL_FILE    = "datasets/northwind-dataset/northwind_data.sql"
 SQL_SCHEMA  = "datasets/northwind-dataset/schema.sql"
-OUTPUT_DIR  = "datasets/csv/"
+OUTPUT_DIR  = "datasets/northwind-dataset/csv/"
 
 def extract_schemas(sql_file_path):
     """
