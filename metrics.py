@@ -1,21 +1,3 @@
-# metrics_researcher.py
-
-"""
-Research-grade metrics for evaluating synthetic relational data.
-
-Derived from:
-- IRG: Incremental Relational Generator [1]
-- SQLSynthGen: Differentially-Private SQL Synthesizer [2]
-- Synthetic Data Generation for Enterprise DBMS [3]
-
-Metrics:
-  4.2 Statistical fidelity (KS, chi-square, child-count KS)
-  4.3 Distance-based (TV, KL, JS, Wasserstein, MMD)
-  4.4 Schema & constraint adherence (dtype, range, PK, FK)
-  4.1 Performance & domain checks (generation time, dialect coverage)
-  7   Evaluation from CSV directories
-"""
-
 import os
 import glob
 import numpy as np
@@ -24,301 +6,264 @@ from scipy.stats import ks_2samp, chi2_contingency, wasserstein_distance, entrop
 from sklearn.metrics.pairwise import rbf_kernel
 
 
-def compute_statistical_fidelity(real: pd.Series, synth: pd.Series):
+def load_csv_dir(directory: str) -> dict:
     """
-    - Numeric → two-sample KS test
-    - Categorical → chi-square (Laplace smoothing) + JS divergence
+    Load all CSV files in a directory into a dict of DataFrames keyed by filename (without extension).
     """
-    real = real.dropna()
-    synth = synth.dropna()
-
-    # If both empty, nothing to compare
-    if real.empty and synth.empty:
-        return {'test': None,
-                'ks_stat': None, 'p_value': None,
-                'chi2_stat': None, 'chi2_p': None,
-                'js_divergence': None}
-
-    # KS on numeric
-    real_num = pd.to_numeric(real, errors='coerce').dropna()
-    synth_num = pd.to_numeric(synth, errors='coerce').dropna()
-    if len(real_num) and len(synth_num):
-        stat, p = ks_2samp(real_num, synth_num)
-        return {'test': 'ks',
-                'ks_stat': stat, 'p_value': p,
-                'chi2_stat': None, 'chi2_p': None,
-                'js_divergence': None}
-
-    # Categorical χ² + JS
-    r_counts = real.astype(str).value_counts()
-    s_counts = synth.astype(str).value_counts()
-    idx = r_counts.index.union(s_counts.index)
-    if len(idx) == 0:
-        return {'test': None,
-                'ks_stat': None, 'p_value': None,
-                'chi2_stat': None, 'chi2_p': None,
-                'js_divergence': None}
-
-    r = r_counts.reindex(idx, fill_value=0).values + 1
-    s = s_counts.reindex(idx, fill_value=0).values + 1
-    chi2, chi2_p, _, _ = chi2_contingency(np.stack([r, s], axis=1))
-    p_norm = r / r.sum()
-    q_norm = s / s.sum()
-    m = 0.5 * (p_norm + q_norm)
-    jsd = 0.5 * (entropy(p_norm, m) + entropy(q_norm, m))
-
     return {
-        'test': 'chi2_jsd',
-        'ks_stat': None, 'p_value': None,
-        'chi2_stat': chi2, 'chi2_p': chi2_p,
-        'js_divergence': jsd
+        os.path.splitext(os.path.basename(path))[0]: pd.read_csv(path)
+        for path in glob.glob(os.path.join(directory, '*.csv'))
     }
 
 
-def compute_child_count_ks(real_child: pd.DataFrame,
-                           synth_child: pd.DataFrame,
-                           fk_cols):
-    if isinstance(fk_cols, (list, tuple)):
-        rc = real_child.groupby(fk_cols).size()
-        sc = synth_child.groupby(fk_cols).size()
-    else:
-        rc = real_child.groupby(fk_cols).size()
-        sc = synth_child.groupby(fk_cols).size()
-    stat, p = ks_2samp(rc, sc)
-    return {'child_ks_stat': stat, 'child_ks_p': p}
+def ks_and_chi2(real: pd.Series, synth: pd.Series, table: str, column: str) -> pd.DataFrame:
+    """
+    Compute two-sample KS for numeric data and chi-square + JS divergence for categorical data.
+    Returns a long DataFrame with columns: table, column, metric, value.
+    """
+    real_clean = real.dropna()
+    synth_clean = synth.dropna()
+    rows = []
+
+    # KS for numeric
+    real_num = pd.to_numeric(real_clean, errors='coerce').dropna()
+    synth_num = pd.to_numeric(synth_clean, errors='coerce').dropna()
+    if len(real_num) and len(synth_num):
+        stat, p = ks_2samp(real_num, synth_num)
+        rows.append((table, column, 'ks_stat', stat))
+        rows.append((table, column, 'p_value', p))
+
+    # Chi-square + JS for categorical
+    r_counts = real_clean.astype(str).value_counts()
+    s_counts = synth_clean.astype(str).value_counts()
+    idx = r_counts.index.union(s_counts.index)
+    if not idx.empty:
+        r = (r_counts.reindex(idx, fill_value=0) + 1).values
+        s = (s_counts.reindex(idx, fill_value=0) + 1).values
+        chi2, chi2_p, _, _ = chi2_contingency(np.stack([r, s], axis=1))
+        rows.append((table, column, 'chi2_stat', chi2))
+        rows.append((table, column, 'chi2_p', chi2_p))
+        p_norm = r / r.sum()
+        q_norm = s / s.sum()
+        m = 0.5 * (p_norm + q_norm)
+        jsd = 0.5 * (entropy(p_norm, m) + entropy(q_norm, m))
+        rows.append((table, column, 'js_divergence', jsd))
+
+    return pd.DataFrame(rows, columns=['table', 'column', 'metric', 'value'])
 
 
-def compute_distance_metrics(real: pd.Series, synth: pd.Series):
-    real_counts = real.fillna('NA').astype(str).value_counts(normalize=True)
-    synth_counts = synth.fillna('NA').astype(str).value_counts(normalize=True)
+def distance_metrics_df(real: pd.Series, synth: pd.Series, table: str, column: str) -> pd.DataFrame:
+    """
+    Compute TV, KL, JS divergence for any column; plus Wasserstein & MMD if numeric.
+    Returns a long DataFrame with columns: table, column, metric, value.
+    """
+    real_str = real.fillna('NA').astype(str)
+    synth_str = synth.fillna('NA').astype(str)
+    real_counts = real_str.value_counts(normalize=True)
+    synth_counts = synth_str.value_counts(normalize=True)
     idx = real_counts.index.union(synth_counts.index)
     p = real_counts.reindex(idx, fill_value=0).values
     q = synth_counts.reindex(idx, fill_value=0).values
+
+    rows = []
     tv = 0.5 * np.sum(np.abs(p - q))
-    kl = entropy(p+1e-12, q+1e-12)
-    m = 0.5*(p+q)
-    js = 0.5*(entropy(p+1e-12, m)+entropy(q+1e-12, m))
-    wass = None; mmd = None
+    kl = entropy(p + 1e-12, q + 1e-12)
+    m = 0.5 * (p + q)
+    js = 0.5 * (entropy(p + 1e-12, m) + entropy(q + 1e-12, m))
+    rows.extend([
+        (table, column, 'tv', tv),
+        (table, column, 'kl', kl),
+        (table, column, 'js', js),
+    ])
+
+    # Numeric-specific metrics
     if pd.api.types.is_numeric_dtype(real) and pd.api.types.is_numeric_dtype(synth):
         rn = pd.to_numeric(real, errors='coerce').dropna().astype(float)
         sn = pd.to_numeric(synth, errors='coerce').dropna().astype(float)
         if len(rn) and len(sn):
             wass = wasserstein_distance(rn, sn)
-            X, Y = rn.values.reshape(-1,1), sn.values.reshape(-1,1)
-            Kxx, Kyy, Kxy = rbf_kernel(X,X), rbf_kernel(Y,Y), rbf_kernel(X,Y)
-            mmd = Kxx.sum()/(len(X)**2) + Kyy.sum()/(len(Y)**2) - 2*Kxy.sum()/(len(X)*len(Y))
-    return {'tv': tv, 'kl': kl, 'js': js, 'wasserstein': wass, 'mmd': mmd}
+            X, Y = rn.values.reshape(-1, 1), sn.values.reshape(-1, 1)
+            Kxx, Kyy, Kxy = rbf_kernel(X, X), rbf_kernel(Y, Y), rbf_kernel(X, Y)
+            mmd = (Kxx.sum() / (len(X)**2)
+                   + Kyy.sum() / (len(Y)**2)
+                   - 2 * Kxy.sum() / (len(X)*len(Y)))
+            rows.append((table, column, 'wasserstein', wass))
+            rows.append((table, column, 'mmd', mmd))
+
+    return pd.DataFrame(rows, columns=['table', 'column', 'metric', 'value'])
 
 
-def compute_schema_adherence(df: pd.DataFrame,
-                             dtype_map: dict,
-                             range_map: dict):
-    dtype_results = {}
-    for col, dt in dtype_map.items():
-        series = df[col]
-        if dt.startswith('int'):
-            nums = pd.to_numeric(series, errors='coerce').dropna().astype(float)
-            valid = nums.apply(lambda x: x.is_integer())
-        elif dt in ('float','real'):
-            valid = pd.to_numeric(series, errors='coerce').notna()
-        elif dt in ('date','timestamp'):
-            valid = pd.to_datetime(series, errors='coerce').notna()
-        else:
-            valid = series.notna()
-        dtype_results[col] = valid.mean()
-    range_results = {}
-    for col, (lo, hi) in range_map.items():
-        nums = pd.to_numeric(df[col], errors='coerce').dropna().astype(float)
-        if lo is not None and hi is not None:
-            in_range = nums.between(lo, hi)
-        else:
-            in_range = pd.Series(True, index=nums.index)
-        range_results[col] = in_range.mean()
-    return {'dtype_validity': dtype_results,
-            'range_adherence': range_results}
-
-
-def compute_constraint_adherence(synth: dict, metadata: dict):
-    results = {}
-    for table, df in synth.items():
-        results.setdefault(table, {})
-        if df.empty:
-            results[table]['pk_uniqueness'] = None
-            continue
-        meta = metadata.get(table, {})
-        pk_cols = meta.get('pk', [])
-        results[table]['pk_uniqueness'] = (df.drop_duplicates(subset=pk_cols).shape[0] / len(df)
-                                           if pk_cols else None)
-        for fk in meta.get('fks', []):
-            child_cols = fk.get('columns', [])
-            parent_tbl = fk.get('ref_table')
-            parent_cols= fk.get('ref_columns') or child_cols
-            parent_df  = synth.get(parent_tbl)
-            if not child_cols or parent_df is None:
+def child_count_ks_df(real_data: dict, synth_data: dict, schema: dict) -> pd.DataFrame:
+    """
+    For each foreign-key in schema, compares child-count distributions via KS.
+    Returns table, fk, metric, value.
+    """
+    rows = []
+    for table, meta in schema.items():
+        for fk in meta.get('foreign_keys', []):
+            fk_cols = fk['columns']
+            parent = fk['ref_table']
+            if parent not in real_data or parent not in synth_data:
                 continue
-            if isinstance(child_cols, (list, tuple)):
-                child_keys = df[child_cols].apply(lambda r: tuple(r), axis=1)
-                parent_keys= parent_df[parent_cols].apply(lambda r: tuple(r), axis=1)
-                key_name   = "_".join(child_cols)
+            rc = real_data[parent].groupby(fk_cols).size()
+            sc = synth_data[parent].groupby(fk_cols).size()
+            stat, p = ks_2samp(rc, sc)
+            fk_name = '_'.join(fk_cols) if isinstance(fk_cols, (list, tuple)) else fk_cols
+            rows.append((table, fk_name, 'child_ks_stat', stat))
+            rows.append((table, fk_name, 'child_ks_p', p))
+    return pd.DataFrame(rows, columns=['table', 'fk', 'metric', 'value'])
+
+
+def schema_adherence_df(synth_data: dict, schema: dict, real_data: dict) -> pd.DataFrame:
+    """
+    Compute dtype validity and range adherence per column.
+    Returns table, column, check, metric, value.
+    """
+    rows = []
+    for table, df in synth_data.items():
+        meta = schema.get(table, {})
+        # dtype_map from schema (fallback to no columns)
+        dtype_map = {c['name']: c['type'].lower() for c in meta.get('columns', [])}
+        # get real_df if available
+        real_df = real_data.get(table)
+        if real_df is not None:
+            range_map = {
+                col: (real_df[col].min(), real_df[col].max())
+                for col in real_df.columns
+                if pd.api.types.is_numeric_dtype(real_df[col])
+            }
+        else:
+            range_map = {}
+
+        # dtype validity
+        for col, dt in dtype_map.items():
+            series = df[col]
+            if dt.startswith('int'):
+                valid = pd.to_numeric(series, errors='coerce').dropna().apply(lambda x: float(x).is_integer()).mean()
+            elif dt in ('float', 'real'):
+                valid = pd.to_numeric(series, errors='coerce').notna().mean()
+            elif dt in ('date', 'timestamp'):
+                valid = pd.to_datetime(series, errors='coerce').notna().mean()
             else:
-                child_keys, parent_keys = df[child_cols], parent_df[parent_cols]
-                key_name = child_cols
-            results[table][f'fk_{key_name}'] = child_keys.isin(parent_keys).mean()
-    return results
+                valid = series.notna().mean()
+            rows.append((table, col, 'dtype', 'validity', valid))
+
+        # range adherence
+        for col, (lo, hi) in range_map.items():
+            nums = pd.to_numeric(df[col], errors='coerce').dropna().astype(float)
+            in_range = nums.between(lo, hi).mean() if lo is not None and hi is not None else np.nan
+            rows.append((table, col, 'range', 'adherence', in_range))
+
+    return pd.DataFrame(rows, columns=['table', 'column', 'check', 'metric', 'value'])
+
+
+def constraint_metrics_df(synth_data: dict, schema: dict) -> pd.DataFrame:
+    """
+    Compute PK uniqueness and FK validity for each table.
+    Returns table, constraint, metric, value.
+    """
+    rows = []
+    for table, df in synth_data.items():
+        meta = schema.get(table, {})
+        pk = meta.get('primary_key', [])
+        if pk and len(df):
+            frac = df.drop_duplicates(subset=pk).shape[0] / len(df)
+            rows.append((table, 'pk_uniqueness', 'value', frac))
+        for fk in meta.get('foreign_keys', []):
+            child_cols = fk['columns']
+            parent = fk['ref_table']
+            if parent not in synth_data:
+                continue
+            child_keys = df[child_cols].apply(tuple, axis=1)
+            parent_keys = synth_data[parent][fk['ref_columns']].apply(tuple, axis=1)
+            frac = child_keys.isin(parent_keys).mean()
+            fk_name = '_'.join(child_cols) if isinstance(child_cols, (list, tuple)) else child_cols
+            rows.append((table, f'fk_{fk_name}', 'value', frac))
+    return pd.DataFrame(rows, columns=['table', 'constraint', 'metric', 'value'])
+
+
+# Interpretation rules by metric
+interpret_rules = {
+    'ks_stat':        lambda v: 'no shift' if v > 0.05 else 'shift detected',
+    'p_value':        lambda v: 'match' if v > 0.05 else 'difference',
+    'chi2_p':         lambda v: 'match' if v > 0.05 else 'difference',
+    'js_divergence':  lambda v: 'high fidelity' if v < 0.1 else 'divergence',
+    'tv':             lambda v: 'high fidelity' if v < 0.1 else 'noticeable divergence',
+    'kl':             lambda v: 'high fidelity' if v < 0.1 else 'noticeable divergence',
+    'js':             lambda v: 'high fidelity' if v < 0.1 else 'noticeable divergence',
+    'wasserstein':    lambda v: 'small distance' if v < 1 else 'larger distance',
+    'mmd':            lambda v: 'small MMD' if v < 1e-3 else 'larger MMD',
+    'child_ks_stat':  lambda v: 'counts match' if v < 0.05 else 'counts differ',
+    'child_ks_p':     lambda v: 'counts match' if v > 0.05 else 'counts differ',
+    'validity':       lambda v: 'OK' if v > 0.99 else 'violations',
+    'adherence':      lambda v: 'OK' if v > 0.99 else 'violations',
+    'value':          lambda v: 'OK' if v > 0.99 else 'violations',
+}
+
+
+def interpret(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add an 'interpretation' column based on metric and value.
+    """
+    def apply_rule(row):
+        metric = row['metric']
+        value = row['value']
+        rule = interpret_rules.get(metric)
+        return rule(value) if rule is not None else None
+
+    df['interpretation'] = df.apply(apply_rule, axis=1)
+    return df
+
+
+def apply_per_column(real_data: dict, synth_data: dict, func, **extra) -> pd.DataFrame:
+    """
+    Apply a function over each table and each column of real vs synth data.
+    """
+    frames = []
+    for table, real_df in real_data.items():
+        synth_df = synth_data.get(table)
+        if synth_df is None:
+            continue
+        for col in real_df.columns:
+            frames.append(func(real_df[col], synth_df[col], table=table, column=col, **extra))
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+class SyntheticDataEvaluator:
+    def __init__(self, real_dir: str, synth_dir: str, schema: dict):
+        self.real_data = load_csv_dir(real_dir)
+        self.synth_data = load_csv_dir(synth_dir)
+        self.schema = schema
+
+    def evaluate(self) -> dict:
+        stats = apply_per_column(self.real_data, self.synth_data, ks_and_chi2)
+        dist  = apply_per_column(self.real_data, self.synth_data, distance_metrics_df)
+        child = child_count_ks_df(self.real_data, self.synth_data, self.schema)
+        schema_chk = schema_adherence_df(self.synth_data, self.schema, self.real_data)
+        cons  = constraint_metrics_df(self.synth_data, self.schema)
+
+        return {
+            'statistical_fidelity': interpret(stats),
+            'distance_metrics':     interpret(dist),
+            'child_count_ks':       interpret(child),
+            'schema_adherence':     interpret(schema_chk),
+            'constraint_adherence': interpret(cons),
+        }
+
+    def save_to_csv(self, results: dict, output_dir: str):
+        os.makedirs(output_dir, exist_ok=True)
+        for name, df in results.items():
+            df.to_csv(os.path.join(output_dir, f"{name}.csv"), index=False)
 
 
 def evaluate_from_csv_dirs(real_dir: str,
                            synth_dir: str,
-                           schema_tables: dict) -> dict:
-    # load real CSVs
-    real_data = {os.path.splitext(os.path.basename(p))[0]: pd.read_csv(p)
-                 for p in glob.glob(os.path.join(real_dir, '*.csv'))}
-    # load synthetic CSVs
-    synth_data = {os.path.splitext(os.path.basename(p))[0]: pd.read_csv(p)
-                  for p in glob.glob(os.path.join(synth_dir, '*.csv'))}
-    stats, dist, child, schema_chk = {}, {}, {}, {}
-    for tbl, real_df in real_data.items():
-        synth_df = synth_data.get(tbl)
-        if synth_df is None or synth_df.empty:
-            continue
-        stats[tbl] = {col: compute_statistical_fidelity(real_df[col], synth_df[col])
-                      for col in real_df.columns}
-        dist[tbl]  = {col: compute_distance_metrics(real_df[col], synth_df[col])
-                      for col in real_df.columns}
-        child[tbl] = {}
-        for fk in schema_tables[tbl].get('foreign_keys', []):
-            fk_cols = fk['columns']
-            key_str = "_".join(fk_cols) if isinstance(fk_cols,(list,tuple)) else fk_cols
-            child[tbl][key_str] = compute_child_count_ks(
-                real_data[fk['ref_table']], synth_data[fk['ref_table']], fk_cols)
-        dtype_map = {c['name']: c['type'].lower() for c in schema_tables[tbl]['columns']}
-        range_map = {col:(real_df[col].min(), real_df[col].max())
-                     for col in real_df.columns if pd.api.types.is_numeric_dtype(real_df[col])}
-        schema_chk[tbl] = compute_schema_adherence(synth_df, dtype_map, range_map)
-    meta_cons = {t:{'pk':schema_tables[t]['primary_key'],
-                    'fks':schema_tables[t]['foreign_keys']}
-                for t in schema_tables}
-    cons = compute_constraint_adherence(synth_data, meta_cons)
-    return {
-        'statistical_fidelity': stats,
-        'distance_metrics':     dist,
-        'child_count_ks':       child,
-        'schema_adherence':     schema_chk,
-        'constraint_adherence': cons
-    }
-
-
-def interpret_and_save(full_results: dict, output_dir: str):
+                           schema_tables: dict,
+                           output_dir: str) -> dict:
     """
-    Convert full_results into pandas DataFrames with an added 'Interpretation'
-    column, and write each to CSV files.
+    Convenience wrapper: load data, run all metrics, save CSVs, and return DataFrames.
     """
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    def interpret_stat(row):
-        test = row['Test']
-        if test == 'ks':
-            return 'no shift' if row['P-value'] > 0.05 else 'shift detected'
-        elif test == 'chi2_jsd':
-            return (
-                'categorical match'
-                if row['P-value'] > 0.05 and row['JS divergence'] is not None and row['JS divergence'] < 0.1
-                else 'categories differ'
-            )
-        else:
-            return 'no data'
-
-    # 1) Statistical fidelity → DataFrame with interpretation
-    stat_rows = []
-    for tbl, cols in full_results['statistical_fidelity'].items():
-        for col, m in cols.items():
-            stat_rows.append({
-                'Table': tbl,
-                'Column': col,
-                'Test': m['test'],
-                'Statistic': m.get('ks_stat', m.get('chi2_stat')),
-                'P-value': m.get('p_value', m.get('chi2_p')),
-                'JS divergence': m.get('js_divergence')
-            })
-    stats_df = pd.DataFrame(stat_rows)
-    stats_df['Interpretation'] = stats_df.apply(interpret_stat, axis=1)
-    stats_df.to_csv(os.path.join(output_dir, 'statistical_fidelity.csv'), index=False)
-
-    # 2) Distance metrics
-    def interpret_dist(row):
-        # small values (<0.1) are good
-        vals = [row['TV'], row['KL'], row['JS']]
-        if all(v < 0.1 for v in vals):
-            return "high fidelity"
-        return "noticeable divergence"
-
-    dist_rows = []
-    for tbl, cols in full_results['distance_metrics'].items():
-        for col, d in cols.items():
-            dist_rows.append({
-                'Table': tbl,
-                'Column': col,
-                'TV': d['tv'],
-                'KL': d['kl'],
-                'JS': d['js'],
-                'Wasserstein': d['wasserstein'],
-                'MMD': d['mmd']
-            })
-    dist_df = pd.DataFrame(dist_rows)
-    dist_df['Interpretation'] = dist_df.apply(interpret_dist, axis=1)
-    dist_df.to_csv(os.path.join(output_dir, 'distance_metrics.csv'), index=False)
-
-    # 3) Child-count KS
-    def interpret_child(row):
-        return ("counts match" if row['P-value'] > 0.05 else "counts differ")
-
-    child_rows = []
-    for tbl, fks in full_results['child_count_ks'].items():
-        for fk, m in fks.items():
-            child_rows.append({
-                'Table': tbl,
-                'FK': fk,
-                'KS stat': m['child_ks_stat'],
-                'P-value': m['child_ks_p']
-            })
-
-
-    child_df = pd.DataFrame(child_rows)
-    if not child_df.empty:
-        child_df['Interpretation'] = child_df.apply(interpret_child, axis=1)
-        child_df.to_csv(os.path.join(output_dir, 'child_count_ks.csv'), index=False)
-
-    # 4) Schema & range adherence
-    def interpret_schema(row):
-        return ("OK" if row['Value'] > 0.99 else "violations")
-
-    schema_rows = []
-    for tbl, sc in full_results['schema_adherence'].items():
-        for col, v in sc['dtype_validity'].items():
-            schema_rows.append({'Table': tbl, 'Column': col, 'Check': 'dtype', 'Value': v})
-        for col, v in sc['range_adherence'].items():
-            schema_rows.append({'Table': tbl, 'Column': col, 'Check': 'range', 'Value': v})
-    schema_df = pd.DataFrame(schema_rows)
-    schema_df['Interpretation'] = schema_df.apply(interpret_schema, axis=1)
-    schema_df.to_csv(os.path.join(output_dir, 'schema_adherence.csv'), index=False)
-
-    # 5) Constraint adherence
-    def interpret_constraint(row):
-        if row['Constraint'] == 'pk_uniqueness':
-            return ("OK" if row['Value'] and row['Value'] > 0.99 else "duplicates")
-        else:
-            return ("OK" if row['Value'] and row['Value'] > 0.99 else "violations")
-
-    cons_rows = []
-    for tbl, c in full_results['constraint_adherence'].items():
-        cons_rows.append({'Table': tbl, 'Constraint': 'pk_uniqueness', 'Value': c.get('pk_uniqueness')})
-        for k, v in c.items():
-            if k.startswith('fk_'):
-                cons_rows.append({'Table': tbl, 'Constraint': k, 'Value': v})
-    cons_df = pd.DataFrame(cons_rows)
-    cons_df['Interpretation'] = cons_df.apply(interpret_constraint, axis=1)
-    cons_df.to_csv(os.path.join(output_dir, 'constraint_adherence.csv'), index=False)
-
-    print(f"All result tables with interpretations written to {output_dir}")
-
+    evaluator = SyntheticDataEvaluator(real_dir, synth_dir, schema_tables)
+    results = evaluator.evaluate()
+    evaluator.save_to_csv(results, output_dir)
+    return results
