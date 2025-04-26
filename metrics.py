@@ -25,27 +25,54 @@ from sklearn.metrics.pairwise import rbf_kernel
 
 
 def compute_statistical_fidelity(real: pd.Series, synth: pd.Series):
+    """
+    - Numeric → two-sample KS test
+    - Categorical → chi-square (Laplace smoothing) + JS divergence
+    """
     real = real.dropna()
     synth = synth.dropna()
-    # numeric KS
-    rnum = pd.to_numeric(real, errors='coerce').dropna()
-    snum = pd.to_numeric(synth, errors='coerce').dropna()
-    if len(rnum) and len(snum):
-        stat, p = ks_2samp(rnum, snum)
-        return {'test': 'ks', 'ks_stat': stat, 'p_value': p}
-    # categorical χ² + JS
+
+    # If both empty, nothing to compare
+    if real.empty and synth.empty:
+        return {'test': None,
+                'ks_stat': None, 'p_value': None,
+                'chi2_stat': None, 'chi2_p': None,
+                'js_divergence': None}
+
+    # KS on numeric
+    real_num = pd.to_numeric(real, errors='coerce').dropna()
+    synth_num = pd.to_numeric(synth, errors='coerce').dropna()
+    if len(real_num) and len(synth_num):
+        stat, p = ks_2samp(real_num, synth_num)
+        return {'test': 'ks',
+                'ks_stat': stat, 'p_value': p,
+                'chi2_stat': None, 'chi2_p': None,
+                'js_divergence': None}
+
+    # Categorical χ² + JS
     r_counts = real.astype(str).value_counts()
     s_counts = synth.astype(str).value_counts()
     idx = r_counts.index.union(s_counts.index)
+    if len(idx) == 0:
+        return {'test': None,
+                'ks_stat': None, 'p_value': None,
+                'chi2_stat': None, 'chi2_p': None,
+                'js_divergence': None}
+
     r = r_counts.reindex(idx, fill_value=0).values + 1
     s = s_counts.reindex(idx, fill_value=0).values + 1
     chi2, chi2_p, _, _ = chi2_contingency(np.stack([r, s], axis=1))
-    pn, qn = r/r.sum(), s/s.sum()
-    m = 0.5*(pn+qn)
-    jsd = 0.5*(entropy(pn, m)+entropy(qn, m))
-    return {'test': 'chi2_jsd',
-            'chi2_stat': chi2, 'chi2_p': chi2_p,
-            'js_divergence': jsd}
+    p_norm = r / r.sum()
+    q_norm = s / s.sum()
+    m = 0.5 * (p_norm + q_norm)
+    jsd = 0.5 * (entropy(p_norm, m) + entropy(q_norm, m))
+
+    return {
+        'test': 'chi2_jsd',
+        'ks_stat': None, 'p_value': None,
+        'chi2_stat': chi2, 'chi2_p': chi2_p,
+        'js_divergence': jsd
+    }
 
 
 def compute_child_count_ks(real_child: pd.DataFrame,
@@ -189,16 +216,20 @@ def interpret_and_save(full_results: dict, output_dir: str):
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # Helper for KS/chi2 interpretation
     def interpret_stat(row):
-        if row['Test'] == 'KS':
-            return ("no shift" if row['P-value'] > 0.05
-                    else "shift detected")
+        test = row['Test']
+        if test == 'ks':
+            return 'no shift' if row['P-value'] > 0.05 else 'shift detected'
+        elif test == 'chi2_jsd':
+            return (
+                'categorical match'
+                if row['P-value'] > 0.05 and row['JS divergence'] is not None and row['JS divergence'] < 0.1
+                else 'categories differ'
+            )
         else:
-            return ("categorical match" if (row['P-value'] > 0.05 and row['JS divergence'] < 0.1)
-                    else "categories differ")
+            return 'no data'
 
-    # 1) Statistical fidelity
+    # 1) Statistical fidelity → DataFrame with interpretation
     stat_rows = []
     for tbl, cols in full_results['statistical_fidelity'].items():
         for col, m in cols.items():
