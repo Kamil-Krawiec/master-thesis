@@ -1,5 +1,5 @@
 # ======================================
-# FULL AUTOMATED GENERATOR COMPARISON SCRIPT
+# FULL AUTOMATED GENERATOR COMPARISON SCRIPT (UPDATED)
 # ======================================
 
 # Required Libraries
@@ -66,23 +66,28 @@ def save_plot(fig, filename):
     pdf.savefig(fig)
     plt.close(fig)
 
+def plot_barplot(df, metric_col, value_col, title, ylabel, filename, ylim=None, add_labels=True, hue=None):
+    fig = plt.figure(figsize=(10, 6))
+    ax = sns.barplot(x=metric_col, y=value_col, data=df, errorbar=None, hue=hue)
+    plt.title(title)
+    plt.ylabel(ylabel)
+    plt.xlabel(metric_col.capitalize())
+    if ylim:
+        plt.ylim(ylim)
+    plt.grid(True)
+
+    if add_labels:
+        for container in ax.containers:
+            ax.bar_label(container, fmt='%.3f', label_type='edge', padding=3, fontsize=9)
+
+    save_plot(fig, filename)
+
 def plot_boxplot(df, metric_col, value_col, title, ylabel, filename):
     fig = plt.figure(figsize=(12, 6))
     sns.boxplot(x=metric_col, y=value_col, data=df)
     plt.title(title)
     plt.ylabel(ylabel)
-    plt.xlabel('Generator')
-    plt.grid(True)
-    save_plot(fig, filename)
-
-def plot_barplot(df, metric_col, value_col, title, ylabel, filename, ylim=None):
-    fig = plt.figure(figsize=(10, 6))
-    sns.barplot(x=metric_col, y=value_col, data=df, errorbar=None)
-    plt.title(title)
-    plt.ylabel(ylabel)
-    plt.xlabel('Generator')
-    if ylim:
-        plt.ylim(ylim)
+    plt.xlabel(metric_col.capitalize())
     plt.grid(True)
     save_plot(fig, filename)
 
@@ -96,22 +101,32 @@ plot_boxplot(child_ks_stat, 'generator', 'value', 'Child Count KS Statistics Com
 
 # 3.2 Constraint Adherence Analysis
 constraint_adherence = merged_data['constraint_adherence']
-plot_barplot(constraint_adherence, 'generator', 'value', 'Constraint Adherence Comparison', 'Constraint Value', 'constraint_adherence_comparison.png', ylim=(0.9, 1.05))
+plot_barplot(constraint_adherence, 'generator', 'value', 'Constraint Adherence Comparison', 'Constraint Value', 'constraint_adherence_comparison.png', ylim=(0, 1.05))
 
-# 3.3 Distance Metrics Analysis
+# 3.3 Distance Metrics Analysis (NEW NORMALIZED VERSION)
 distance_metrics = merged_data['distance_metrics']
-fig = plt.figure(figsize=(16, 8))
-sns.boxplot(x='generator', y='value', hue='metric', data=distance_metrics)
-plt.title('Distance Metrics (TV, KL, JS) Comparison')
-plt.ylabel('Divergence Value')
-plt.xlabel('Generator')
+
+# Normalize distance metrics
+distance_metrics['normalized_value'] = distance_metrics['value'] / distance_metrics.groupby('metric')['value'].transform('max')
+
+distance_avg = distance_metrics.groupby(['generator', 'metric'])['normalized_value'].mean().reset_index()
+
+fig = plt.figure(figsize=(14, 7))
+ax = sns.barplot(data=distance_avg, x='metric', y='normalized_value', hue='generator', errorbar=None)
+plt.title('Normalized Distance Metrics (TV, KL, JS) Average Divergence Comparison')
+plt.ylabel('Normalized Divergence Value')
+plt.xlabel('Metric Type')
 plt.grid(True)
-plt.legend(title='Metric')
+plt.legend(title='Generator')
+
+for container in ax.containers:
+    ax.bar_label(container, fmt='%.2f', label_type='edge', padding=3, fontsize=9)
+
 save_plot(fig, 'distance_metrics_comparison.png')
 
 # 3.4 Schema Adherence Analysis
 schema_adherence = merged_data['schema_adherence']
-plot_barplot(schema_adherence, 'generator', 'value', 'Schema Adherence Comparison', 'Schema Validity', 'schema_adherence_comparison.png', ylim=(0.9, 1.05))
+plot_barplot(schema_adherence, 'generator', 'value', 'Schema Adherence Comparison', 'Schema Validity', 'schema_adherence_comparison.png', ylim=(0, 1.05))
 
 # 3.5 Statistical Fidelity (JS Divergence) Analysis
 statistical_fidelity = merged_data['statistical_fidelity']
@@ -126,7 +141,7 @@ plot_boxplot(js_div, 'generator', 'value', 'Statistical Fidelity - JS Divergence
 score_summary = {
     'child_count_ks_avg': child_ks_stat.groupby('generator')['value'].mean(),
     'constraint_adherence_avg': constraint_adherence.groupby('generator')['value'].mean(),
-    'distance_metrics_avg': distance_metrics.groupby('generator')['value'].mean(),
+    'distance_metrics_avg': distance_metrics.groupby('generator')['normalized_value'].mean(),
     'schema_adherence_avg': schema_adherence.groupby('generator')['value'].mean(),
     'js_divergence_avg': js_div.groupby('generator')['value'].mean(),
 }
@@ -140,7 +155,7 @@ score_df.to_csv(os.path.join(output_path, 'generator_score_summary.csv'), index=
 
 # Plot score comparison
 for metric in score_df.columns[1:]:
-    plot_barplot(score_df, 'generator', metric, f'Comparison: {metric.replace("_", " ").title()}', metric.replace("_", " ").title(), f'{metric}_comparison.png')
+    plot_barplot(score_df, 'generator', metric, f'Comparison: {metric.replace("_", " ").title()}', metric.replace("_", " ").title(), f'{metric}_comparison.png', add_labels=True)
 
 # ------------------------
 # 5. Print Best Generators
