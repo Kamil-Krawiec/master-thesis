@@ -1,101 +1,163 @@
-#!/usr/bin/env python3
-import os, glob
+# ======================================
+# FULL AUTOMATED GENERATOR COMPARISON SCRIPT
+# ======================================
+
+# Required Libraries
 import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
+import os
+import matplotlib
+from matplotlib.backends.backend_pdf import PdfPages
 
-# --- CONFIGURATION ---
-RESULTS_DIR = 'results-basketball-dataset'
-GENERATORS  = ['data_generator', 'mockaroo']
-OUTPUT_DIR  = 'analysis_output/basketball-dataset_scaled'
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# Use non-interactive backend
+matplotlib.use('Agg')
 
-# Interpretation rules for divergence
-interpret_rules = {
-    'tv': lambda v: 'noticeable divergence' if v >= 0.1 else 'high fidelity',
-    'kl': lambda v: 'noticeable divergence' if v >= 0.1 else 'high fidelity',
-    'js': lambda v: 'noticeable divergence' if v >= 0.1 else 'high fidelity',
-    'wasserstein': lambda v: 'larger distance' if v >= 1 else 'small distance',
-    'mmd': lambda v: 'larger MMD' if v >= 1e-3 else 'small MMD',
+# Set Display Options
+pd.set_option('display.max_columns', None)
+sns.set(style="whitegrid")
+
+# ------------------------
+# 1. Define Paths
+# ------------------------
+
+# Base paths
+data_generator_path = 'results-basketball-dataset/data_generator/'
+mockaroo_path = 'results-basketball-dataset/mockaroo/'
+output_path = 'analysis_results/'
+
+# Create output directory if it doesn't exist
+os.makedirs(output_path, exist_ok=True)
+
+# Define file names
+file_names = [
+    'child_count_ks.csv',
+    'constraint_adherence.csv',
+    'distance_metrics.csv',
+    'schema_adherence.csv',
+    'statistical_fidelity.csv'
+]
+
+# Load datasets
+dg_data = {file.split('.')[0]: pd.read_csv(os.path.join(data_generator_path, file)) for file in file_names}
+mk_data = {file.split('.')[0]: pd.read_csv(os.path.join(mockaroo_path, file)) for file in file_names}
+
+# Label datasets
+def label_dataset(df, generator_name):
+    df['generator'] = generator_name
+    return df
+
+for key in dg_data:
+    dg_data[key] = label_dataset(dg_data[key], 'data_generator')
+    mk_data[key] = label_dataset(mk_data[key], 'mockaroo')
+
+# Merge datasets
+merged_data = {key: pd.concat([dg_data[key], mk_data[key]], ignore_index=True) for key in dg_data.keys()}
+
+# Initialize PDF Report
+pdf = PdfPages(os.path.join(output_path, 'full_analysis_report.pdf'))
+
+# ------------------------
+# 2. Analysis Functions
+# ------------------------
+
+def save_plot(fig, filename):
+    fig.savefig(os.path.join(output_path, filename), bbox_inches='tight')
+    pdf.savefig(fig)
+    plt.close(fig)
+
+def plot_boxplot(df, metric_col, value_col, title, ylabel, filename):
+    fig = plt.figure(figsize=(12, 6))
+    sns.boxplot(x=metric_col, y=value_col, data=df)
+    plt.title(title)
+    plt.ylabel(ylabel)
+    plt.xlabel('Generator')
+    plt.grid(True)
+    save_plot(fig, filename)
+
+def plot_barplot(df, metric_col, value_col, title, ylabel, filename, ylim=None):
+    fig = plt.figure(figsize=(10, 6))
+    sns.barplot(x=metric_col, y=value_col, data=df, errorbar=None)
+    plt.title(title)
+    plt.ylabel(ylabel)
+    plt.xlabel('Generator')
+    if ylim:
+        plt.ylim(ylim)
+    plt.grid(True)
+    save_plot(fig, filename)
+
+# ------------------------
+# 3. Specific Analyses
+# ------------------------
+
+# 3.1 Child Count KS Analysis
+child_ks_stat = merged_data['child_count_ks'][merged_data['child_count_ks']['metric'] == 'child_ks_stat']
+plot_boxplot(child_ks_stat, 'generator', 'value', 'Child Count KS Statistics Comparison', 'KS Statistic Value', 'child_count_ks_stat_comparison.png')
+
+# 3.2 Constraint Adherence Analysis
+constraint_adherence = merged_data['constraint_adherence']
+plot_barplot(constraint_adherence, 'generator', 'value', 'Constraint Adherence Comparison', 'Constraint Value', 'constraint_adherence_comparison.png', ylim=(0.9, 1.05))
+
+# 3.3 Distance Metrics Analysis
+distance_metrics = merged_data['distance_metrics']
+fig = plt.figure(figsize=(16, 8))
+sns.boxplot(x='generator', y='value', hue='metric', data=distance_metrics)
+plt.title('Distance Metrics (TV, KL, JS) Comparison')
+plt.ylabel('Divergence Value')
+plt.xlabel('Generator')
+plt.grid(True)
+plt.legend(title='Metric')
+save_plot(fig, 'distance_metrics_comparison.png')
+
+# 3.4 Schema Adherence Analysis
+schema_adherence = merged_data['schema_adherence']
+plot_barplot(schema_adherence, 'generator', 'value', 'Schema Adherence Comparison', 'Schema Validity', 'schema_adherence_comparison.png', ylim=(0.9, 1.05))
+
+# 3.5 Statistical Fidelity (JS Divergence) Analysis
+statistical_fidelity = merged_data['statistical_fidelity']
+js_div = statistical_fidelity[statistical_fidelity['metric'] == 'js_divergence']
+plot_boxplot(js_div, 'generator', 'value', 'Statistical Fidelity - JS Divergence Comparison', 'JS Divergence Value', 'statistical_fidelity_js_divergence_comparison.png')
+
+# ------------------------
+# 4. Overall Score Comparison
+# ------------------------
+
+# Compute averages
+score_summary = {
+    'child_count_ks_avg': child_ks_stat.groupby('generator')['value'].mean(),
+    'constraint_adherence_avg': constraint_adherence.groupby('generator')['value'].mean(),
+    'distance_metrics_avg': distance_metrics.groupby('generator')['value'].mean(),
+    'schema_adherence_avg': schema_adherence.groupby('generator')['value'].mean(),
+    'js_divergence_avg': js_div.groupby('generator')['value'].mean(),
 }
 
-# --- LOAD ALL RESULTS ---
-all_dfs = []
-for gen in GENERATORS:
-    path = os.path.join(RESULTS_DIR, gen, '*.csv')
-    for fn in glob.glob(path):
-        grp = os.path.splitext(os.path.basename(fn))[0]
-        df = pd.read_csv(fn)
-        df['generator']     = gen
-        df['metric_group']  = grp
-        all_dfs.append(df)
-all_df = pd.concat(all_dfs, ignore_index=True)
+# Create DataFrame
+score_df = pd.DataFrame(score_summary)
+score_df.reset_index(inplace=True)
 
-# ------------------------------------------------------------------------
-# 4.3 DISTANCE-BASED METRICS (filtered + scaled)
-# ------------------------------------------------------------------------
-dm = all_df[all_df.metric_group == 'distance_metrics'].copy()
+# Save scores as CSV
+score_df.to_csv(os.path.join(output_path, 'generator_score_summary.csv'), index=False)
 
-# Safely convert column names and drop any id-like columns
-dm['column'] = dm['column'].fillna('').astype(str)
-dm = dm[~dm['column'].str.contains('id', case=False)]
+# Plot score comparison
+for metric in score_df.columns[1:]:
+    plot_barplot(score_df, 'generator', metric, f'Comparison: {metric.replace("_", " ").title()}', metric.replace("_", " ").title(), f'{metric}_comparison.png')
 
-# 1) Raw boxplots
-plt.figure(figsize=(8,4))
-dm.boxplot(column='value', by=['metric','generator'], rot=45)
-plt.suptitle("Raw Distance Metrics by Generator")
-plt.xlabel("Metric / Generator"); plt.ylabel("Value")
-plt.tight_layout()
-plt.savefig(f"{OUTPUT_DIR}/distance_raw_box.png")
-plt.close()
+# ------------------------
+# 5. Print Best Generators
+# ------------------------
 
-# 2) Scaled (min–max) boxplots
-dm['scaled'] = dm.groupby('metric')['value'] \
-    .transform(lambda x: (x - x.min())/(x.max() - x.min()))
+better_in = []
+for metric in score_df.columns[1:]:
+    better_gen = score_df.loc[score_df[metric].idxmin() if 'divergence' in metric or 'ks' in metric or 'distance' in metric else score_df[metric].idxmax(), 'generator']
+    better_in.append((metric, better_gen))
 
-plt.figure(figsize=(8,4))
-dm.boxplot(column='scaled', by=['metric','generator'], rot=45)
-plt.suptitle("Scaled Distance Metrics (0–1) by Generator")
-plt.xlabel("Metric / Generator"); plt.ylabel("Scaled Value")
-plt.tight_layout()
-plt.savefig(f"{OUTPUT_DIR}/distance_scaled_box.png")
-plt.close()
+# Save conclusions
+with open(os.path.join(output_path, 'generator_comparison_conclusions.txt'), 'w') as f:
+    f.write("=== 🧠 Overall Better Generator per Metric ===\n")
+    for metric, gen in better_in:
+        f.write(f"- {metric.replace('_', ' ').title()}: {gen}\n")
 
-# 3) Average scaled bar chart
-avg_scaled = dm.groupby(['metric','generator'])['scaled'].mean().unstack()
-ax = avg_scaled.plot(kind='bar', figsize=(6,3), rot=0)
-ax.set_title("Average Scaled Distance per Metric")
-ax.set_ylabel("Mean Scaled Value")
-for bar in ax.patches:
-    ax.annotate(f"{bar.get_height():.2f}",
-                (bar.get_x()+bar.get_width()/2, bar.get_height()),
-                ha='center', va='bottom', fontsize=8)
-plt.tight_layout()
-plt.savefig(f"{OUTPUT_DIR}/distance_avg_scaled.png")
-plt.close()
+# Close PDF
+pdf.close()
 
-# 4) Top‐5 divergent features per metric/generator
-records = []
-for gen in GENERATORS:
-    sub = dm[dm.generator == gen]
-    for m, rule in interpret_rules.items():
-        flagged = sub[sub.metric == m].copy()
-        flagged['status'] = flagged['value'].apply(rule)
-        bad = flagged[flagged['status'] != 'high fidelity']
-        top5 = bad.nlargest(5, 'value')[['table','column','metric','value']]
-        top5['generator'] = gen
-        records.append(top5)
-top5_df = pd.concat(records, ignore_index=True)
-print("\nTop 5 Divergent Features per Generator & Metric:")
-print(top5_df.to_string(index=False, float_format="%.3f"))
-
-# 5) Horizontal bar chart for top-5 JS divergences
-js_worst = top5_df[top5_df.metric == 'js']
-plt.figure(figsize=(6,3))
-ax = js_worst.plot.barh(x='column', y='value', color=['#1f77b4','#ff7f0e'], legend=False)
-plt.title("Top 5 JS Divergences")
-plt.xlabel("JS Divergence")
-plt.tight_layout()
-plt.savefig(f"{OUTPUT_DIR}/js_top5_h.png")
-plt.close()
-
-print(f"\nCharts saved to {OUTPUT_DIR}/")
+print("\n✅ FULL COMPARISON ANALYSIS SAVED SUCCESSFULLY! ✅")
